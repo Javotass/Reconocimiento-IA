@@ -3,18 +3,26 @@ main.py
 -------
 Entry point for the real-time hand-gesture → image switcher.
 
-Layout
-------
-┌────────────────────┬─────────────────────┐
-│   Cámara en vivo   │   Imagen del gesto  │
-│  (con landmarks)   │   (1 / 2 / 3 / –)  │
-└────────────────────┴─────────────────────┘
+Modos
+-----
+  LIVE    – funcionamiento normal (reconoce y muestra imagen)
+  RECORD  – captura landmarks para el dataset (Fase 2)
 
 Controles
 ---------
-  Q  – salir
-  R  – recargar imágenes desde disco (útil mientras reemplazas archivos)
-  S  – guardar captura de pantalla en `capturas/`
+  Q       – salir  (guarda el dataset automáticamente)
+  M       – alterna entre modo LIVE y RECORD
+  D       – activa/desactiva debug overlay
+  R       – (modo LIVE) recarga imágenes desde disco
+  S       – guardar captura de pantalla en capturas/
+  F       – (modo RECORD) fuerza guardado del CSV ahora
+
+  ── en modo RECORD ──
+  1       – graba gesto UNO  5 s
+  2       – graba gesto DOS  5 s
+  3       – graba gesto TRES 5 s
+  4       – graba gesto FOUR 5 s
+  O       – graba gesto OK   5 s
 """
 
 import os
@@ -23,8 +31,9 @@ import time
 import cv2
 import numpy as np
 
-from gesture_detector import GestureDetector
-from image_manager    import ImageManager
+from gesture_detector    import GestureDetector
+from image_manager       import ImageManager
+from dataset_collector   import DatasetCollector, GESTURE_NAMES
 
 # ── configuración ──────────────────────────────────────────────────────────────
 CAMERA_INDEX    = 0          # índice de la cámara (0 = predeterminada)
@@ -38,9 +47,12 @@ COLOR_ACTIVE    = (0, 255, 100)   # verde vibrante – gesto activo
 COLOR_IDLE      = (180, 180, 180) # gris – sin gesto
 COLOR_BG_BANNER = (30, 30, 30)
 COLOR_DEBUG     = (80, 200, 255)  # amarillo-cyan – texto debug
+COLOR_RECORD    = (0, 80, 230)    # rojo – modo grabación
+COLOR_REC_LIVE  = (0, 200, 255)   # naranja – grabando activamente
 
 # Fade
-FADE_STEP = 0.08   # fracción por frame (~12 frames = ~0.4 s a 30 fps)
+FADE_STEP        = 0.08   # fracción por frame (~12 frames = ~0.4 s a 30 fps)
+RECORD_DURATION  = 5.0    # segundos de grabación por sesión
 # ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -86,6 +98,49 @@ def build_hud(
     return hud
 
 
+def build_record_overlay(frame: np.ndarray, collector: "DatasetCollector",
+                         remaining: float) -> np.ndarray:
+    """
+    Dibuja encima del frame de cámara el estado del modo RECORD:
+      - banner rojo superior con MODE: RECORD
+      - si está grabando: barra de cuenta atrás + etiqueta
+      - tabla lateral con muestras por clase
+    """
+    out = frame.copy()
+    h, w = out.shape[:2]
+
+    # ── banner superior ─────────────────────────────────────────────────
+    banner = np.full((36, w, 3), (20, 20, 180), dtype=np.uint8)
+    if collector.is_recording:
+        msg = f"  REC  [{collector.session_label}]  {remaining:.1f}s"
+        cv2.putText(banner, msg, (8, 26), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, COLOR_REC_LIVE, 2, cv2.LINE_AA)
+        # barra de progreso
+        frac  = max(0.0, remaining / RECORD_DURATION)
+        bar_w = int((w - 20) * frac)
+        cv2.rectangle(banner, (10, 28), (10 + bar_w, 33), COLOR_REC_LIVE, -1)
+    else:
+        cv2.putText(banner, "  MODE: RECORD  |  1/2/3/4/O → grabar  |  F → guardar CSV  |  M → volver",
+                    (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 255), 1, cv2.LINE_AA)
+
+    out[:36] = cv2.addWeighted(out[:36], 0.35, banner, 0.65, 0)
+
+    # ── tabla de conteos (esquina inferior izquierda) ────────────────────────
+    counts = collector.class_counts
+    pending = collector.pending_rows
+    lines = [f"Dataset ({pending} sin guardar):"] + [
+        f"  {GESTURE_NAMES.get(g, str(g)):6s}: {counts.get(GESTURE_NAMES.get(g,''), 0):>5d}"
+        for g in range(1, 6)
+    ]
+    ty = h - 10 - len(lines) * 20
+    for line in lines:
+        cv2.putText(out, line, (10, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.52, (220, 220, 255), 1, cv2.LINE_AA)
+        ty += 20
+
+    return out
+
+
 def build_gesture_panel(img: np.ndarray, gesture: int, panel_size: int) -> np.ndarray:
     """Add a small badge with the gesture number on top of the gesture image."""
     panel = cv2.resize(img, (panel_size, panel_size), interpolation=cv2.INTER_AREA)
@@ -117,25 +172,27 @@ def run():
         print(f"[ERROR] No se pudo abrir la cámara (índice {CAMERA_INDEX}).")
         sys.exit(1)
 
-    detector = GestureDetector()
-    images   = ImageManager(display_size=(PANEL_SIZE, PANEL_SIZE))
+    detector  = GestureDetector()
+    images    = ImageManager(display_size=(PANEL_SIZE, PANEL_SIZE))
+    collector = DatasetCollector()
     captures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
     cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
 
-    prev_time  = time.perf_counter()
-    fps        = 0.0
-    debug_mode = False
+    prev_time   = time.perf_counter()
+    fps         = 0.0
+    debug_mode  = False
+    record_mode = False      # M → alterna entre LIVE y RECORD
+    rec_remaining = 0.0
 
-    # ── estado fade ──────────────────────────────────────────────────────────
+    # ── estado fade ────────────────────────────────────
     last_gesture      = -1
     fade_alpha        = 1.0
     fading_from_panel = None
     displayed_panel   = None
-    # ─────────────────────────────────────────────────────────────────────────
 
-    print("[INFO] Sistema listo. Muestra 1, 2 o 3 dedos frente a la cámara.")
-    print("[INFO]  Q → salir  |  R → recargar imágenes  |  S → guardar captura  |  D → debug")
+    print("[INFO] Sistema listo.")
+    print("[INFO]  Q → salir  |  M → modo RECORD  |  D → debug  |  S → captura")
 
     while True:
         ret, frame = cap.read()
@@ -147,6 +204,10 @@ def run():
 
         # ── detección ────────────────────────────────────────────────────────
         gesture, annotated, raw, confidence, hand_side = detector.process(frame)
+
+        # ── grabación de dataset ────────────────────────────────────────
+        if record_mode and collector.is_recording:
+            _, rec_remaining = collector.tick(detector.last_landmarks)
 
         # ── FPS ──────────────────────────────────────────────────────────────
         now  = time.perf_counter()
@@ -174,7 +235,9 @@ def run():
             displayed_panel = target_img
 
         gesture_panel = build_gesture_panel(displayed_panel, gesture, PANEL_SIZE)
-
+        # ── overlay modo RECORD sobre cámara ──────────────────────────────
+        if record_mode:
+            annotated = build_record_overlay(annotated, collector, rec_remaining)
         # ── ajustar alturas ──────────────────────────────────────────────────
         cam_h, cam_w  = annotated.shape[:2]
         panel_h       = PANEL_SIZE
@@ -203,20 +266,36 @@ def run():
         if key == ord('q') or key == 27:
             print("[INFO] Saliendo…")
             break
+        elif key == ord('m') or key == ord('M'):
+            record_mode = not record_mode
+            estado = "RECORD" if record_mode else "LIVE"
+            print(f"[INFO] Modo: {estado}")
         elif key == ord('d') or key == ord('D'):
             debug_mode = not debug_mode
             print(f"[INFO] Debug {'activado' if debug_mode else 'desactivado'}.")
-        elif key == ord('r'):
-            images.reload()
-            detector.reset()
-            print("[INFO] Imágenes recargadas.")
+        elif key == ord('f') or key == ord('F'):
+            collector.save()
         elif key == ord('s'):
             ensure_dir(captures_dir)
             ts   = time.strftime("%Y%m%d_%H%M%S")
             path = os.path.join(captures_dir, f"captura_{ts}.png")
             cv2.imwrite(path, composite)
             print(f"[INFO] Captura guardada en {path}")
+        elif key == ord('r') and not record_mode:
+            images.reload()
+            detector.reset()
+            print("[INFO] Imágenes recargadas.")
+        elif record_mode and not collector.is_recording:
+            # teclas de grabación: 1 2 3 4 O
+            gesture_key_map = {
+                ord('1'): "ONE",  ord('2'): "TWO", ord('3'): "THREE",
+                ord('4'): "FOUR", ord('o'): "OK",  ord('O'): "OK",
+            }
+            if key in gesture_key_map:
+                collector.start_session(gesture_key_map[key], RECORD_DURATION)
+                rec_remaining = RECORD_DURATION
 
+    collector.save()
     cap.release()
     cv2.destroyAllWindows()
 

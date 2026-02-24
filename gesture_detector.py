@@ -23,6 +23,12 @@ import numpy as np
 from mediapipe.tasks import python as mp_tasks
 from mediapipe.tasks.python import vision as mp_vision
 
+# ML classifier (cargado si existe dataset/gesture_model.pkl)
+try:
+    from gesture_classifier import GestureClassifier as _GestureClassifier
+except ImportError:  # por si el archivo no existe todavía
+    _GestureClassifier = None
+
 # ── tuneable constants ────────────────────────────────────────────────────────
 BUFFER_SIZE    = 10
 MIN_CONFIDENCE = 0.5
@@ -102,6 +108,10 @@ class GestureDetector:
         self._last_confirmed: int = 0
         self._last_hand_side: str = "?"
         self._last_confidence: float = 0.0
+        self.last_landmarks = None   # ← expuesto para DatasetCollector
+
+        # ML classifier — usa el modelo si está disponible, si no, reglas
+        self._classifier = _GestureClassifier() if _GestureClassifier else None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -126,6 +136,7 @@ class GestureDetector:
 
         raw_gesture = 0
         confidence  = 0.0
+        self.last_landmarks = None
 
         if results.hand_landmarks and results.handedness:
             for landmarks, handedness in zip(
@@ -136,7 +147,18 @@ class GestureDetector:
 
                 if confidence >= 0.35:   # ignora mano muy pequeña o cortada
                     _draw_landmarks(annotated, landmarks, h, w)
-                    raw_gesture = self._count_fingers(landmarks, self._last_hand_side)
+                    # ── clasificación: ML si disponible, reglas si no ────────
+                    if self._classifier and self._classifier.available:
+                        raw_gesture = self._classifier.predict(landmarks)
+                        if raw_gesture == 0:  # baja confianza → fallback
+                            raw_gesture = self._count_fingers(
+                                landmarks, self._last_hand_side
+                            )
+                    else:
+                        raw_gesture = self._count_fingers(
+                            landmarks, self._last_hand_side
+                        )
+                    self.last_landmarks = landmarks   # guardar para dataset
                 break   # primera mano únicamente
 
         self._last_confidence = confidence

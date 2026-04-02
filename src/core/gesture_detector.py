@@ -25,7 +25,7 @@ from mediapipe.tasks.python import vision as mp_vision
 
 # ML classifier (cargado si existe dataset/gesture_model.pkl)
 try:
-    from gesture_classifier import GestureClassifier as _GestureClassifier
+    from .gesture_classifier import GestureClassifier as _GestureClassifier
 except ImportError:  # por si el archivo no existe todavía
     _GestureClassifier = None
 
@@ -57,8 +57,11 @@ _HAND_CONNECTIONS = [
 
 def _ensure_model() -> str:
     """Download the hand landmarker model if not present. Returns its path."""
-    base_dir   = os.path.dirname(os.path.abspath(__file__))
-    model_path = os.path.join(base_dir, MODEL_FILENAME)
+    # Navegar a la raíz del proyecto (dos niveles arriba: src/core -> src -> raíz)
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    models_dir = os.path.join(project_root, "models")
+    os.makedirs(models_dir, exist_ok=True)
+    model_path = os.path.join(models_dir, MODEL_FILENAME)
     if not os.path.isfile(model_path):
         print(f"[GestureDetector] Descargando modelo ({MODEL_FILENAME}) …")
         urllib.request.urlretrieve(MODEL_URL, model_path)

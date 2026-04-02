@@ -22,8 +22,9 @@ import joblib
 import numpy as np
 
 # ── rutas ─────────────────────────────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR  = os.path.join(BASE_DIR, "dataset")
+# Navegar a la raíz del proyecto (dos niveles arriba: src/core -> src -> raíz)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATASET_DIR  = os.path.join(PROJECT_ROOT, "dataset")
 MODEL_PATH   = os.path.join(DATASET_DIR, "gesture_model.pkl")
 ENCODER_PATH = os.path.join(DATASET_DIR, "label_encoder.pkl")
 

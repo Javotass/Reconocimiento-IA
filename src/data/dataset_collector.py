@@ -34,7 +34,9 @@ import time
 from typing import Optional
 
 # ── constantes ────────────────────────────────────────────────────────────────
-DATASET_DIR   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dataset")
+# Navegar a la raíz del proyecto (dos niveles arriba: src/data -> src -> raíz)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATASET_DIR   = os.path.join(PROJECT_ROOT, "dataset")
 DEFAULT_CSV   = os.path.join(DATASET_DIR, "dataset_landmarks.csv")
 GESTURE_NAMES = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "OK"}
 _HEADER       = ["label"] + [f"{c}{i}" for i in range(21) for c in ("x", "y", "z")]

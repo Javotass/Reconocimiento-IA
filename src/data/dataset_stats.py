@@ -22,8 +22,9 @@ import os
 import sys
 from collections import Counter
 
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR  = os.path.join(BASE_DIR, "dataset")
+# Navegar a la raíz del proyecto (dos niveles arriba: src/data -> src -> raíz)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATASET_DIR  = os.path.join(PROJECT_ROOT, "dataset")
 DEFAULT_CSV  = os.path.join(DATASET_DIR, "dataset_landmarks.csv")
 
 TARGET_PER_CLASS = 2000   # objetivo recomendado por clase

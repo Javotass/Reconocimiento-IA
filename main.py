@@ -13,6 +13,8 @@ Controles
   Q       – salir  (guarda el dataset automáticamente)
   M       – alterna entre modo LIVE y RECORD
   D       – activa/desactiva debug overlay
+  P       – mostrar/ocultar panel lateral (imagen)
+  B       – mostrar/ocultar regiones del cuerpo (debug pose)
   R       – (modo LIVE) recarga imágenes desde disco
   S       – guardar captura de pantalla en capturas/
   F       – (modo RECORD) fuerza guardado del CSV ahora
@@ -31,9 +33,13 @@ import time
 import cv2
 import numpy as np
 
-from gesture_detector    import GestureDetector
-from image_manager       import ImageManager
-from dataset_collector   import DatasetCollector, GESTURE_NAMES
+from src.core.gesture_detector    import GestureDetector
+from src.core.pose_detector       import PoseDetector
+from src.visual.image_manager     import ImageManager
+from src.visual.body_regions      import BodyRegions
+from src.visual.effect_renderer   import EffectRenderer, draw_effect_status
+from src.visual.visual_effects    import get_effect_name
+from src.data.dataset_collector   import DatasetCollector, GESTURE_NAMES
 
 # ── configuración ──────────────────────────────────────────────────────────────
 CAMERA_INDEX    = 0          # índice de la cámara (0 = predeterminada)
@@ -175,6 +181,12 @@ def run():
     detector  = GestureDetector()
     images    = ImageManager(display_size=(PANEL_SIZE, PANEL_SIZE))
     collector = DatasetCollector()
+    
+    # ── nuevos módulos para efectos visuales ──────────────────────────────────
+    pose_detector = PoseDetector()
+    body_regions  = BodyRegions()
+    effect_renderer = EffectRenderer(fade_speed=FADE_STEP)
+    
     captures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")
 
     cv2.namedWindow(WINDOW_TITLE, cv2.WINDOW_NORMAL)
@@ -183,6 +195,8 @@ def run():
     fps         = 0.0
     debug_mode  = False
     record_mode = False      # M → alterna entre LIVE y RECORD
+    show_panel  = True       # P → mostrar/ocultar panel lateral
+    show_body_regions = False  # B → debug de regiones corporales
     rec_remaining = 0.0
 
     # ── estado fade ────────────────────────────────────
@@ -192,7 +206,7 @@ def run():
     displayed_panel   = None
 
     print("[INFO] Sistema listo.")
-    print("[INFO]  Q → salir  |  M → modo RECORD  |  D → debug  |  S → captura")
+    print("[INFO]  Q → salir  |  M → modo RECORD  |  D → debug  |  P → panel  |  B → body debug  |  S → captura")
 
     while True:
         ret, frame = cap.read()
@@ -202,8 +216,25 @@ def run():
 
         frame = cv2.flip(frame, 1)   # efecto espejo más natural
 
-        # ── detección ────────────────────────────────────────────────────────
+        # ── detección de gestos ──────────────────────────────────────────────
         gesture, annotated, raw, confidence, hand_side = detector.process(frame)
+        
+        # ── detección de pose (torso superior) ───────────────────────────────
+        pose_landmarks, pose_detected = pose_detector.detect(frame)
+        if pose_detected:
+            h, w = frame.shape[:2]
+            key_points = pose_detector.get_key_points(pose_landmarks)
+            body_regions.update(pose_landmarks, key_points, w, h)
+            
+            # Actualizar efecto basado en el gesto detectado
+            effect_renderer.update_gesture(gesture)
+            
+            # Renderizar efecto sobre el frame original (antes de anotaciones)
+            effect_renderer.render(annotated, body_regions)
+            
+            # Debug: dibujar regiones corporales si está activado
+            if show_body_regions:
+                body_regions.draw_all_regions(annotated)
 
         # ── grabación de dataset ────────────────────────────────────────
         if record_mode and collector.is_recording:
@@ -238,6 +269,11 @@ def run():
         # ── overlay modo RECORD sobre cámara ──────────────────────────────
         if record_mode:
             annotated = build_record_overlay(annotated, collector, rec_remaining)
+        
+        # ── overlay de estado de efectos (si hay pose detectada) ─────────────
+        if pose_detected and debug_mode:
+            draw_effect_status(annotated, effect_renderer, position=(10, cam_h - 80))
+        
         # ── ajustar alturas ──────────────────────────────────────────────────
         cam_h, cam_w  = annotated.shape[:2]
         panel_h       = PANEL_SIZE
@@ -248,12 +284,19 @@ def run():
             annotated = cv2.resize(annotated, (new_w, panel_h))
             cam_h, cam_w = annotated.shape[:2]
 
-        # ── HUD ──────────────────────────────────────────────────────────────
-        hud          = build_hud(gesture, raw, fps, cam_w + 4 + PANEL_SIZE,
-                                  debug_mode, confidence, hand_side)
-        separator    = np.full((panel_h, 4, 3), COLOR_BG_BANNER, dtype=np.uint8)
-        top_row      = np.hstack([annotated, separator, gesture_panel])
-        composite    = np.vstack([top_row, hud])
+        # ── composición final con o sin panel ────────────────────────────────
+        if show_panel:
+            # Mostrar panel lateral con imagen del gesto
+            hud          = build_hud(gesture, raw, fps, cam_w + 4 + PANEL_SIZE,
+                                      debug_mode, confidence, hand_side)
+            separator    = np.full((panel_h, 4, 3), COLOR_BG_BANNER, dtype=np.uint8)
+            top_row      = np.hstack([annotated, separator, gesture_panel])
+            composite    = np.vstack([top_row, hud])
+        else:
+            # Modo sin panel: solo cámara con efectos
+            hud          = build_hud(gesture, raw, fps, cam_w,
+                                      debug_mode, confidence, hand_side)
+            composite    = np.vstack([annotated, hud])
 
         cv2.imshow(WINDOW_TITLE, composite)
 
@@ -273,6 +316,14 @@ def run():
         elif key == ord('d') or key == ord('D'):
             debug_mode = not debug_mode
             print(f"[INFO] Debug {'activado' if debug_mode else 'desactivado'}.")
+        elif key == ord('p') or key == ord('P'):
+            show_panel = not show_panel
+            estado = "visible" if show_panel else "oculto"
+            print(f"[INFO] Panel lateral {estado}.")
+        elif key == ord('b') or key == ord('B'):
+            show_body_regions = not show_body_regions
+            estado = "activado" if show_body_regions else "desactivado"
+            print(f"[INFO] Debug de regiones corporales {estado}.")
         elif key == ord('f') or key == ord('F'):
             collector.save()
         elif key == ord('s'):

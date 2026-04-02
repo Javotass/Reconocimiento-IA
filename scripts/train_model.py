@@ -38,8 +38,9 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import LabelEncoder
 
 # ── rutas ─────────────────────────────────────────────────────────────────────
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR  = os.path.join(BASE_DIR, "dataset")
+# Navegar a la raíz del proyecto (un nivel arriba: scripts -> raíz)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATASET_DIR  = os.path.join(PROJECT_ROOT, "dataset")
 DEFAULT_CSV  = os.path.join(DATASET_DIR, "dataset_landmarks.csv")
 MODEL_PATH   = os.path.join(DATASET_DIR, "gesture_model.pkl")
 ENCODER_PATH = os.path.join(DATASET_DIR, "label_encoder.pkl")

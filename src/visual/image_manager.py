@@ -18,14 +18,16 @@ import cv2
 import numpy as np
 
 # ── paths (relative to this file's directory) ─────────────────────────────────
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# Navegar a la raíz del proyecto (dos niveles arriba: src/visual -> src -> raíz)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_IMAGES_DIR = os.path.join(_PROJECT_ROOT, "images")
 
 IMAGE_PATHS: dict[int, str] = {
-    1: os.path.join(_BASE_DIR, "images", "gesture_1.jpg"),
-    2: os.path.join(_BASE_DIR, "images", "gesture_2.jpg"),
-    3: os.path.join(_BASE_DIR, "images", "gesture_3.jpg"),
-    4: os.path.join(_BASE_DIR, "images", "gesture_4.jpg"),
-    5: os.path.join(_BASE_DIR, "images", "gesture_5.jpg"),
+    1: os.path.join(_IMAGES_DIR, "gesture_1.jpg"),
+    2: os.path.join(_IMAGES_DIR, "gesture_2.jpg"),
+    3: os.path.join(_IMAGES_DIR, "gesture_3.jpg"),
+    4: os.path.join(_IMAGES_DIR, "gesture_4.jpg"),
+    5: os.path.join(_IMAGES_DIR, "gesture_5.jpg"),
 }
 
 # Placeholder colours (BGR) used when a file is missing

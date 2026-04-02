@@ -16,8 +16,9 @@ import os
 import numpy as np
 import cv2
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-IMAGES_DIR = os.path.join(BASE_DIR, "images")
+# Navegar a la raíz del proyecto (un nivel arriba: scripts -> raíz)
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+IMAGES_DIR = os.path.join(PROJECT_ROOT, "images")
 os.makedirs(IMAGES_DIR, exist_ok=True)
 
 W, H = 480, 480

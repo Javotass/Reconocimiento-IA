@@ -26,6 +26,7 @@ class BodyRegions:
     def __init__(self):
         self.landmarks = None
         self.key_points = {}
+        self._smoothed_key_points = {}
         self.frame_width = 640
         self.frame_height = 480
 
@@ -34,7 +35,24 @@ class BodyRegions:
     def update(self, landmarks, key_points: dict, frame_width: int, frame_height: int):
         """Update regions based on new landmarks."""
         self.landmarks = landmarks
-        self.key_points = key_points
+        # Small EMA smoothing on normalized coordinates to reduce jitter.
+        if not self._smoothed_key_points:
+            self._smoothed_key_points = dict(key_points)
+        else:
+            alpha = 0.35
+            smoothed = dict(self._smoothed_key_points)
+            for name, point in key_points.items():
+                if name in smoothed:
+                    prev = smoothed[name]
+                    smoothed[name] = tuple(
+                        prev[i] * (1.0 - alpha) + point[i] * alpha
+                        for i in range(len(point))
+                    )
+                else:
+                    smoothed[name] = point
+            self._smoothed_key_points = smoothed
+
+        self.key_points = self._smoothed_key_points
         self.frame_width = frame_width
         self.frame_height = frame_height
 
@@ -201,6 +219,109 @@ class BodyRegions:
             "y": max(0, y_min - padding),
             "width": min(self.frame_width, x_max - x_min + 2 * padding),
             "height": min(self.frame_height, y_max - y_min + 2 * padding),
+        }
+
+    def get_netherite_chestplate_region(self) -> Optional[dict]:
+        """
+        Build a blocky, Minecraft-like chestplate polygon aligned to shoulders.
+
+        Returns a dict with:
+          - points: outer polygon in pixels
+          - inner_points: inset polygon for shading
+          - center: anchor point
+          - bounds: bounding box for the plate
+          - shoulder_left / shoulder_right: shoulder anchors in pixels
+        """
+        shoulder = self.get_shoulder_region()
+        torso = self.get_torso_region()
+        if shoulder is None or torso is None:
+            return None
+
+        ls = np.array(shoulder["left"], dtype=np.float32)
+        rs = np.array(shoulder["right"], dtype=np.float32)
+        lh = np.array(torso["bottom_left"], dtype=np.float32)
+        rh = np.array(torso["bottom_right"], dtype=np.float32)
+
+        shoulder_mid = (ls + rs) * 0.5
+        hip_mid = (lh + rh) * 0.5
+        center = (shoulder_mid + hip_mid) * 0.5
+
+        shoulder_span = max(44.0, float(np.linalg.norm(rs - ls)))
+        torso_h = max(80.0, float(np.linalg.norm(hip_mid - shoulder_mid)))
+
+        def _lerp(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+            return a * (1.0 - t) + b * t
+
+        def _snap_point(pt: np.ndarray, step: int = 4) -> tuple[int, int]:
+            x = int(round(float(pt[0]) / step) * step)
+            y = int(round(float(pt[1]) / step) * step)
+            x = min(max(0, x), self.frame_width - 1)
+            y = min(max(0, y), self.frame_height - 1)
+            return (x, y)
+
+        # Side rails that follow torso inclination.
+        l0 = _lerp(ls, lh, 0.08)
+        l1 = _lerp(ls, lh, 0.28)
+        l2 = _lerp(ls, lh, 0.54)
+        l3 = _lerp(ls, lh, 0.80)
+
+        r0 = _lerp(rs, rh, 0.08)
+        r1 = _lerp(rs, rh, 0.28)
+        r2 = _lerp(rs, rh, 0.54)
+        r3 = _lerp(rs, rh, 0.80)
+
+        neck_half = max(12.0, shoulder_span * 0.12)
+        collar_y = shoulder_mid[1] - shoulder_span * 0.10
+
+        top_left = np.array([ls[0] - shoulder_span * 0.24, l0[1]], dtype=np.float32)
+        top_right = np.array([rs[0] + shoulder_span * 0.24, r0[1]], dtype=np.float32)
+
+        neck_l_outer = np.array([center[0] - neck_half, collar_y], dtype=np.float32)
+        neck_l_inner = np.array([center[0] - neck_half * 0.35, collar_y - shoulder_span * 0.05], dtype=np.float32)
+        neck_r_inner = np.array([center[0] + neck_half * 0.35, collar_y - shoulder_span * 0.05], dtype=np.float32)
+        neck_r_outer = np.array([center[0] + neck_half, collar_y], dtype=np.float32)
+
+        waist_l = _lerp(l2, l3, 0.30) + np.array([shoulder_span * 0.08, 0], dtype=np.float32)
+        waist_r = _lerp(r2, r3, 0.30) + np.array([-shoulder_span * 0.08, 0], dtype=np.float32)
+        tip = _lerp(hip_mid, shoulder_mid, -0.12)
+
+        points = np.array([
+            _snap_point(top_left),
+            _snap_point(l0 + np.array([shoulder_span * 0.03, -shoulder_span * 0.06], dtype=np.float32)),
+            _snap_point(neck_l_outer),
+            _snap_point(neck_l_inner),
+            _snap_point(neck_r_inner),
+            _snap_point(neck_r_outer),
+            _snap_point(r0 + np.array([-shoulder_span * 0.03, -shoulder_span * 0.06], dtype=np.float32)),
+            _snap_point(top_right),
+            _snap_point(r1 + np.array([-shoulder_span * 0.05, 0], dtype=np.float32)),
+            _snap_point(r2 + np.array([-shoulder_span * 0.03, 0], dtype=np.float32)),
+            _snap_point(waist_r),
+            _snap_point(tip),
+            _snap_point(waist_l),
+            _snap_point(l2 + np.array([shoulder_span * 0.03, 0], dtype=np.float32)),
+            _snap_point(l1 + np.array([shoulder_span * 0.05, 0], dtype=np.float32)),
+        ], dtype=np.int32)
+
+        inner_points = (points.astype(np.float32) * 0.90 + center * 0.10).astype(np.int32)
+        xs = points[:, 0]
+        ys = points[:, 1]
+
+        center_x = int(center[0])
+        shoulder_y = int(shoulder_mid[1])
+
+        return {
+            "points": points,
+            "inner_points": inner_points,
+            "center": (center_x, shoulder_y),
+            "bounds": {
+                "x": max(0, int(xs.min())),
+                "y": max(0, int(ys.min())),
+                "width": min(self.frame_width, int(xs.max() - xs.min())),
+                "height": min(self.frame_height, int(ys.max() - ys.min())),
+            },
+            "shoulder_left": ls,
+            "shoulder_right": rs,
         }
 
     # ── visualization helpers ──────────────────────────────────────────────────

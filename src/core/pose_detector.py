@@ -29,6 +29,7 @@ import collections
 import os
 import urllib.request
 from typing import Optional
+from dataclasses import dataclass
 
 import cv2
 import mediapipe as mp
@@ -38,6 +39,8 @@ from mediapipe.tasks.python import vision as mp_vision
 
 # ── tuneable constants ────────────────────────────────────────────────────────
 SMOOTHING_WINDOW = 5  # frames to average for position stability
+MAX_LOST_FRAMES = 8
+MIN_TRACKING_CONFIDENCE = 0.35
 
 MODEL_FILENAME = "pose_landmarker_lite.task"
 MODEL_URL = (
@@ -68,6 +71,15 @@ _UPPER_BODY_CONNECTIONS = [
     (23, 24),  # hips
 ]
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _SimpleLandmark:
+    """Lightweight landmark object used for smoothed landmark output."""
+    x: float
+    y: float
+    z: float
+    visibility: float = 1.0
 
 
 def _ensure_model() -> str:
@@ -113,6 +125,8 @@ class PoseDetector:
         self,
         min_detection_confidence: float = 0.5,
         min_presence_confidence: float = 0.5,
+        min_tracking_confidence: float = MIN_TRACKING_CONFIDENCE,
+        max_lost_frames: int = MAX_LOST_FRAMES,
     ):
         model_path = _ensure_model()
 
@@ -130,6 +144,14 @@ class PoseDetector:
         
         # Smoothing buffer for landmark positions
         self._landmark_buffer = collections.deque(maxlen=SMOOTHING_WINDOW)
+
+        # Tracking and confidence state
+        self._min_tracking_confidence = min_tracking_confidence
+        self._max_lost_frames = max_lost_frames
+        self._last_valid_landmarks = None
+        self._lost_frames = 0
+        self._last_pose_confidence = 0.0
+        self._tracking_state = "searching"  # searching | tracking | coasting | lost
         
         print("[PoseDetector] Inicializado correctamente")
 
@@ -156,16 +178,26 @@ class PoseDetector:
         result = self._landmarker.detect_for_video(mp_image, timestamp_ms)
 
         if not result.pose_landmarks or len(result.pose_landmarks) == 0:
-            return None, False
+            return self._handle_pose_missing()
 
         # Get first person's pose (we only track one person)
         landmarks = result.pose_landmarks[0]
         
+        confidence = self._compute_pose_confidence(landmarks)
+        if confidence < self._min_tracking_confidence:
+            return self._handle_pose_missing()
+
+        # Valid pose: update tracking state and smooth.
+        self._lost_frames = 0
+        self._tracking_state = "tracking"
+        self._last_pose_confidence = confidence
+
         # Add to smoothing buffer
         self._landmark_buffer.append(landmarks)
-        
+
         # Return smoothed landmarks
         smoothed = self._smooth_landmarks()
+        self._last_valid_landmarks = smoothed
         return smoothed, True
 
     def draw_on_frame(self, frame: np.ndarray, landmarks) -> None:
@@ -199,6 +231,14 @@ class PoseDetector:
         }
         return points
 
+    def get_tracking_status(self) -> dict:
+        """Expose pose tracking quality for debug HUD and tuning."""
+        return {
+            "state": self._tracking_state,
+            "confidence": round(self._last_pose_confidence, 2),
+            "lost_frames": self._lost_frames,
+        }
+
     # ── private helpers ───────────────────────────────────────────────────────
 
     def _smooth_landmarks(self):
@@ -212,26 +252,99 @@ class PoseDetector:
         if len(self._landmark_buffer) < 2:
             return base
         
-        # Create smoothed version by averaging positions
+        # Create smoothed version by averaging positions.
+        # Shoulders and hips get heavier smoothing than wrists to reduce jitter
+        # while keeping arm motion responsive.
         smoothed = []
         num_landmarks = len(base)
+
+        alpha_map = {
+            LEFT_SHOULDER: 0.35,
+            RIGHT_SHOULDER: 0.35,
+            LEFT_HIP: 0.32,
+            RIGHT_HIP: 0.32,
+            LEFT_ELBOW: 0.28,
+            RIGHT_ELBOW: 0.28,
+            LEFT_WRIST: 0.22,
+            RIGHT_WRIST: 0.22,
+            NOSE: 0.30,
+        }
         
         for i in range(num_landmarks):
             avg_x = sum(frame[i].x for frame in self._landmark_buffer) / len(self._landmark_buffer)
             avg_y = sum(frame[i].y for frame in self._landmark_buffer) / len(self._landmark_buffer)
             avg_z = sum(frame[i].z for frame in self._landmark_buffer) / len(self._landmark_buffer)
-            
-            # Create a simple object with x, y, z attributes
-            class SmoothLandmark:
-                def __init__(self, x, y, z, visibility=1.0):
-                    self.x = x
-                    self.y = y
-                    self.z = z
-                    self.visibility = visibility
-            
-            smoothed.append(SmoothLandmark(avg_x, avg_y, avg_z, base[i].visibility))
+
+            prev = None
+            if self._last_valid_landmarks is not None and i < len(self._last_valid_landmarks):
+                prev = self._last_valid_landmarks[i]
+
+            if prev is not None:
+                alpha = alpha_map.get(i, 0.25)
+                avg_x = prev.x * (1.0 - alpha) + avg_x * alpha
+                avg_y = prev.y * (1.0 - alpha) + avg_y * alpha
+                avg_z = prev.z * (1.0 - alpha) + avg_z * alpha
+
+            vis = getattr(base[i], "visibility", 1.0)
+            smoothed.append(_SimpleLandmark(avg_x, avg_y, avg_z, vis))
         
         return smoothed
+
+    def _handle_pose_missing(self) -> tuple[Optional[list], bool]:
+        """Keep the last stable pose for a few frames when detection is lost."""
+        self._lost_frames += 1
+
+        if self._last_valid_landmarks is not None and self._lost_frames <= self._max_lost_frames:
+            self._tracking_state = "coasting"
+            decay = 1.0 - (self._lost_frames / (self._max_lost_frames + 1))
+            self._last_pose_confidence = max(0.0, self._last_pose_confidence * decay)
+            return self._last_valid_landmarks, True
+
+        self._tracking_state = "lost"
+        self._last_pose_confidence = 0.0
+        self._landmark_buffer.clear()
+        self._last_valid_landmarks = None
+        return None, False
+
+    def _compute_pose_confidence(self, landmarks) -> float:
+        """
+        Heuristic confidence [0..1] based on:
+          - key landmark visibility
+          - torso size (too small usually means far/unstable)
+          - proximity to frame borders
+        """
+        required = [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP]
+        if any(i >= len(landmarks) for i in required):
+            return 0.0
+
+        ls = landmarks[LEFT_SHOULDER]
+        rs = landmarks[RIGHT_SHOULDER]
+        lh = landmarks[LEFT_HIP]
+        rh = landmarks[RIGHT_HIP]
+
+        shoulder_w = float(((ls.x - rs.x) ** 2 + (ls.y - rs.y) ** 2) ** 0.5)
+        torso_h_l = float(((ls.x - lh.x) ** 2 + (ls.y - lh.y) ** 2) ** 0.5)
+        torso_h_r = float(((rs.x - rh.x) ** 2 + (rs.y - rh.y) ** 2) ** 0.5)
+        torso_h = 0.5 * (torso_h_l + torso_h_r)
+        size_conf = min(1.0, (shoulder_w * torso_h) / 0.035)
+
+        key = [NOSE, LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_ELBOW, RIGHT_ELBOW, LEFT_HIP, RIGHT_HIP]
+        vis_vals = [float(getattr(landmarks[i], "visibility", 1.0)) for i in key if i < len(landmarks)]
+        vis_conf = float(np.clip(np.mean(vis_vals), 0.0, 1.0)) if vis_vals else 0.0
+
+        margin = 0.05
+        border_penalty = 0.0
+        for i in key:
+            if i >= len(landmarks):
+                continue
+            x = landmarks[i].x
+            y = landmarks[i].y
+            overflow = max(margin - x, x - (1.0 - margin), margin - y, y - (1.0 - margin), 0.0)
+            border_penalty = max(border_penalty, overflow)
+        border_conf = max(0.0, 1.0 - border_penalty * 10.0)
+
+        confidence = 0.50 * vis_conf + 0.35 * size_conf + 0.15 * border_conf
+        return float(np.clip(confidence, 0.0, 1.0))
 
     def __del__(self):
         """Clean up resources."""

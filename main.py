@@ -68,10 +68,11 @@ def ensure_dir(path: str):
 
 def build_hud(
     gesture: int, raw_gesture: int, fps: float, frame_w: int,
-    debug_mode: bool = False, confidence: float = 1.0, hand_side: str = "?"
+    debug_mode: bool = False, confidence: float = 1.0, hand_side: str = "?",
+    pose_confidence: float = 0.0, pose_state: str = "searching"
 ) -> np.ndarray:
     """Build a status banner below the camera feed."""
-    h   = 38 if not debug_mode else 62
+    h = 38 if not debug_mode else 62
     hud = np.full((h, frame_w, 3), COLOR_BG_BANNER, dtype=np.uint8)
 
     _LABELS = {1: "Gesto 1", 2: "Gesto 2", 3: "Gesto 3", 4: "Gesto 4", 5: "Gesto OK"}
@@ -90,13 +91,16 @@ def build_hud(
     # ── fila debug (solo si debug_mode) ──────────────────────────────────────
     if debug_mode:
         conf_color = COLOR_ACTIVE if confidence >= 0.6 else (0, 140, 255) if confidence >= 0.35 else (0, 60, 220)
+        pose_color = COLOR_ACTIVE if pose_state == "tracking" else (0, 200, 255) if pose_state == "coasting" else (0, 120, 220)
         dbg = (f"raw={raw_gesture}  suav={gesture}  mano={hand_side}"
                f"  conf={confidence:.2f}")
         cv2.putText(hud, dbg, (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.52,
                     COLOR_DEBUG, 1, cv2.LINE_AA)
+        cv2.putText(hud, f"pose={pose_state} ({pose_confidence:.2f})", (12, 34),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, pose_color, 1, cv2.LINE_AA)
         # barra de confianza
         bar_x, bar_y, bar_w, bar_h = frame_w - 160, 40, 140, 10
-        cv2.rectangle(hud, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (60,60,60), -1)
+        cv2.rectangle(hud, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (60, 60, 60), -1)
         filled = int(bar_w * max(0.0, min(1.0, confidence)))
         cv2.rectangle(hud, (bar_x, bar_y), (bar_x + filled, bar_y + bar_h), conf_color, -1)
         cv2.putText(hud, "conf", (bar_x - 42, bar_y + 9),
@@ -221,14 +225,19 @@ def run():
         
         # ── detección de pose (torso superior) ───────────────────────────────
         pose_landmarks, pose_detected = pose_detector.detect(frame)
+
+        # El efecto sigue el gesto siempre; se renderiza solo si hay pose útil.
+        effect_renderer.update_gesture(gesture)
+
+        pose_status = pose_detector.get_tracking_status()
+        pose_confidence = pose_status["confidence"]
+        pose_state = pose_status["state"]
+
         if pose_detected:
             h, w = frame.shape[:2]
             key_points = pose_detector.get_key_points(pose_landmarks)
             body_regions.update(pose_landmarks, key_points, w, h)
-            
-            # Actualizar efecto basado en el gesto detectado
-            effect_renderer.update_gesture(gesture)
-            
+
             # Renderizar efecto sobre el frame original (antes de anotaciones)
             effect_renderer.render(annotated, body_regions)
             
@@ -269,13 +278,15 @@ def run():
         # ── overlay modo RECORD sobre cámara ──────────────────────────────
         if record_mode:
             annotated = build_record_overlay(annotated, collector, rec_remaining)
+
+        # dimensiones actuales de cámara (antes de overlays dependientes de altura)
+        cam_h, cam_w = annotated.shape[:2]
         
         # ── overlay de estado de efectos (si hay pose detectada) ─────────────
         if pose_detected and debug_mode:
             draw_effect_status(annotated, effect_renderer, position=(10, cam_h - 80))
         
         # ── ajustar alturas ──────────────────────────────────────────────────
-        cam_h, cam_w  = annotated.shape[:2]
         panel_h       = PANEL_SIZE
 
         if cam_h != panel_h:
@@ -288,14 +299,16 @@ def run():
         if show_panel:
             # Mostrar panel lateral con imagen del gesto
             hud          = build_hud(gesture, raw, fps, cam_w + 4 + PANEL_SIZE,
-                                      debug_mode, confidence, hand_side)
+                                      debug_mode, confidence, hand_side,
+                                      pose_confidence, pose_state)
             separator    = np.full((panel_h, 4, 3), COLOR_BG_BANNER, dtype=np.uint8)
             top_row      = np.hstack([annotated, separator, gesture_panel])
             composite    = np.vstack([top_row, hud])
         else:
             # Modo sin panel: solo cámara con efectos
             hud          = build_hud(gesture, raw, fps, cam_w,
-                                      debug_mode, confidence, hand_side)
+                                      debug_mode, confidence, hand_side,
+                                      pose_confidence, pose_state)
             composite    = np.vstack([annotated, hud])
 
         cv2.imshow(WINDOW_TITLE, composite)

@@ -1,13 +1,10 @@
 """
 gesture_detector.py
 -------------------
-Detects hand gestures (1, 2 or 3 extended fingers) using the
-MediaPipe Tasks API (mediapipe >= 0.10.x).
+Detects hand gestures (1–5) using the MediaPipe Tasks API
+(HandLandmarker, mediapipe >= 0.10.x).
 
-The old mp.solutions.hands was removed in mediapipe 0.10.21+;
-this module uses mediapipe.tasks.python.vision.HandLandmarker instead.
-
-Temporal smoothing
+Temporal smoothing:
     A rolling buffer of the last BUFFER_SIZE gesture readings is kept.
     The gesture with the highest count (majority vote) is returned, but only
     if it surpasses MIN_CONFIDENCE fraction of the buffer.

@@ -1,106 +1,179 @@
-# Reconocimiento de Gestos con IA
+# Reconocimiento de Gestos con Inteligencia Artificial
 
-Sistema en tiempo real que detecta gestos de tu mano a través de la cámara web y aplica efectos visuales espectaculares sobre tu cuerpo. Muestra 1, 2, 3, 4 o 5 dedos y verás cómo aparece una armadura, fuego, confeti o una corona dorada sobre ti.
-
----
-
-## ¿Qué hace este programa?
-
-1. **Abre tu cámara web** y te muestra en pantalla.
-2. **Detecta tu mano** en tiempo real usando inteligencia artificial.
-3. **Reconoce cuántos dedos estás mostrando** (del 1 al 5).
-4. **Aplica un efecto visual** distinto según el gesto detectado.
-
-Todo ocurre de forma instantánea, sin retardo perceptible.
+Sistema de visión por computador en tiempo real que detecta gestos de la mano mediante la cámara web y proyecta efectos visuales sobre el cuerpo del usuario. Combina detección de landmarks con MediaPipe y un clasificador Random Forest entrenado con datos propios.
 
 ---
 
-## Efectos visuales disponibles
+## Demostración
 
-| Gesto | Dedos | Nombre del efecto | ¿Qué se ve? |
-|-------|-------|-------------------|-------------|
-| ☝️ | 1 dedo | **Shadow Mode** | Armadura de Netherite superpuesta sobre tu torso |
-| ✌️ | 2 dedos | **Golden Hour** | Filtro dorado cinematográfico sobre toda la imagen |
-| 🤟 | 3 dedos | **Fire Shoulders** | Llamas animadas ardiendo en tus hombros |
-| 🖐️ | 4 dedos | **Confetti Rain** | Lluvia de confeti de colores cayendo sobre ti |
-| 🖐️ | 5 dedos | **Golden Crown** | Corona dorada flotando sobre tu cabeza |
-
----
-
-## Requisitos del sistema
-
-- **Python 3.8 – 3.11** (MediaPipe aún no es compatible con Python 3.12+)
-- **Cámara web** (integrada o externa)
-- **Windows / macOS / Linux**
-- Conexión a internet la primera vez (para descargar los modelos de IA)
+| Gesto | Efecto |
+|-------|--------|
+| 1 dedo | **Shadow Mode** — armadura de Netherite superpuesta sobre el torso |
+| 2 dedos | **Golden Hour** — filtro cinematográfico cálido sobre toda la imagen |
+| 3 dedos | **Fire Shoulders** — llamas animadas en los hombros |
+| 4 dedos | **Confetti Rain** — lluvia de confeti de colores |
+| OK (pulgar + índice) | **Golden Crown** — corona dorada sobre la cabeza |
 
 ---
 
-## Instalación paso a paso
+## Arquitectura del sistema
 
-### 1. Descarga el proyecto
+El sistema se organiza en tres capas independientes:
+
+```
+Cámara → MediaPipe Hands → GestureClassifier → EffectRenderer → Pantalla
+                   ↓
+         MediaPipe Pose → BodyRegions → (posicionamiento de efectos)
+```
+
+### 1. Detección de landmarks (MediaPipe)
+
+- **HandLandmarker**: localiza 21 puntos clave de la mano (puntas, nudillos, muñeca). Funciona a ~30 FPS sobre CPU sin GPU dedicada.
+- **PoseLandmarker Lite**: localiza 33 puntos del cuerpo (hombros, caderas, nariz). Se usa exclusivamente para anclar los efectos visuales en la posición correcta del usuario, no para clasificar gestos.
+
+### 2. Clasificación del gesto
+
+El `GestureDetector` combina dos métodos:
+
+**Método geométrico** (activo siempre como fallback):
+- Compara la coordenada Y de la punta de cada dedo con su articulación PIP. Si la punta está por encima, el dedo se considera extendido.
+- Para el gesto OK detecta la distancia euclidiana entre la punta del pulgar y del índice.
+
+**Modelo de Machine Learning** (prioritario cuando está disponible):
+- Random Forest de 300 árboles entrenado con datos propios.
+- Entrada: 63 valores (21 landmarks × 3 coordenadas), normalizados por traslación y escala invariante a la distancia de la mano.
+- Salida: clase entre {ONE, TWO, THREE, FOUR, OK}.
+- Umbral de confianza: 55%. Por debajo de ese valor el sistema cae al método geométrico.
+
+**Suavizado temporal**: los últimos 10 resultados se almacenan en un buffer circular. Se devuelve el gesto mayoritario solo si supera el 50% del buffer, eliminando parpadeos.
+
+### 3. Renderizado de efectos
+
+`EffectRenderer` gestiona las transiciones entre efectos con fade-in/fade-out configurable (~12 frames de transición). Cada filtro recibe el frame de OpenCV y el objeto `BodyRegions` con las coordenadas en píxeles de las regiones corporales (hombros, torso, cabeza).
+
+---
+
+## Resultados del entrenamiento
+
+Dataset recopilado manualmente con 11.658 muestras totales:
+
+| Gesto | Muestras |
+|-------|----------|
+| ONE   | 2.203    |
+| TWO   | 2.277    |
+| THREE | 2.509    |
+| FOUR  | 2.464    |
+| OK    | 2.205    |
+
+Antes del entrenamiento el dataset se balancea por undersampling (todas las clases al mínimo: 2.203). La división es 70% entrenamiento / 15% validación / 15% test, estratificada.
+
+**Random Forest — 99,2% de accuracy en test**
+
+```
+              precision    recall  f1-score   support
+        FOUR      0.991     1.000     0.995       331
+          OK      0.991     1.000     0.995       330
+         ONE      0.994     0.991     0.992       331
+       THREE      1.000     0.976     0.988       331
+         TWO      0.985     0.994     0.989       330
+    accuracy                          0.992      1653
+```
+
+Matriz de confusión:
+
+```
+         FOUR    OK   ONE THREE   TWO
+FOUR      331     0     0     0     0
+OK          0   330     0     0     0
+ONE         0     0   328     0     3
+THREE       3     3     0   323     2
+TWO         0     0     2     0   328
+```
+
+El gesto THREE es el más problemático (8 errores): se confunde con FOUR (3 casos) y con OK (3 casos), probablemente porque la posición de los dedos en ambos casos es geométricamente similar en el plano 2D de la cámara. FOUR y OK tuvieron clasificación perfecta (0 errores).
+
+El MLP obtuvo 98,5%, por lo que el modelo guardado es el Random Forest.
+
+---
+
+## Requisitos
+
+- **Python 3.8–3.11** (MediaPipe no es compatible con 3.12+)
+- Cámara web (integrada o externa)
+- Conexión a internet la primera vez (descarga automática de los modelos de MediaPipe)
+
+---
+
+## Instalación
 
 ```bash
+# 1. Clonar el repositorio
 git clone https://github.com/Javotass/Reconocimiento-IA.git
 cd "reconocimiento IA"
-```
 
-### 2. Crea un entorno virtual (recomendado)
-
-```bash
+# 2. Crear entorno virtual
 python -m venv venv
+venv\Scripts\activate      # Windows
+# source venv/bin/activate  # macOS / Linux
 
-# En Windows:
-venv\Scripts\activate
-
-# En macOS/Linux:
-source venv/bin/activate
-```
-
-### 3. Instala las dependencias
-
-```bash
+# 3. Instalar dependencias
 pip install -r requirements.txt
-```
 
-| Librería | Para qué sirve |
-|----------|----------------|
-| `opencv-python` | Captura y procesamiento de vídeo |
-| `mediapipe` | Detección de manos y pose corporal (IA de Google) |
-| `numpy` | Cálculos matemáticos rápidos |
-| `scikit-learn` | Modelo de machine learning para clasificar gestos |
-| `pandas` | Manejo de datos de entrenamiento |
-| `joblib` | Guardar y cargar el modelo entrenado |
-
-### 4. Verifica que todo esté bien
-
-```bash
+# 4. Verificar instalación
 python scripts/test_imports.py
 ```
 
 ---
 
-## Cómo usar el programa
+## Uso
 
-### Ejecutar
+### Modo EN VIVO
 
 ```bash
 python main.py
 ```
 
-Se abrirá una ventana con tu cámara. Pon tu mano delante y muestra diferentes números de dedos para ver los efectos.
+La ventana muestra la imagen de la cámara con los landmarks de la mano dibujados. A la derecha aparece un panel con el gesto activo. Los efectos se renderizan sobre el frame cuando el sistema detecta pose corporal.
 
-### Controles de teclado
+### Controles
 
 | Tecla | Acción |
 |-------|--------|
-| `Q` | Salir del programa |
-| `M` | Cambiar entre modo **EN VIVO** y modo **GRABACIÓN** |
-| `D` | Mostrar/ocultar información de depuración (confianza del gesto) |
-| `P` | Mostrar/ocultar el panel lateral con imágenes de gestos |
-| `B` | Ver las regiones corporales detectadas |
-| `S` | Tomar una captura de pantalla (se guarda en `capturas/`) |
-| `R` | Recargar las imágenes de efectos |
+| `Q` / `Esc` | Salir |
+| `M` | Alternar entre modo LIVE y modo RECORD |
+| `D` | Mostrar información de debug (confianza, estado de la pose, barra de intensidad) |
+| `P` | Mostrar / ocultar el panel lateral |
+| `B` | Visualizar las regiones corporales detectadas (debug) |
+| `S` | Guardar captura de pantalla en `capturas/` |
+| `R` | Recargar imágenes desde disco |
+
+---
+
+## Entrenar el modelo con datos propios
+
+Si los gestos no se reconocen bien con una mano concreta, es posible reentrenar con datos nuevos en dos pasos.
+
+### Paso 1 — Grabar datos (modo RECORD)
+
+```bash
+python main.py
+```
+
+Pulsar `M` para entrar en modo RECORD. Las teclas `1` `2` `3` `4` `O` inician una sesión de grabación de 5 segundos para cada gesto. Pulsar `F` para guardar el CSV sin cerrar el programa.
+
+Se recomienda grabar al menos 200 muestras por gesto, variando la inclinación y la distancia a la cámara. Para ver cuántas muestras hay acumuladas:
+
+```bash
+python src/data/dataset_stats.py
+```
+
+### Paso 2 — Entrenar
+
+```bash
+python scripts/train_model.py
+```
+
+El script limpia el dataset, balancea las clases, entrena Random Forest y MLP, imprime las métricas detalladas y guarda el mejor modelo en `dataset/gesture_model.pkl`.
 
 ---
 
@@ -109,119 +182,74 @@ Se abrirá una ventana con tu cámara. Pon tu mano delante y muestra diferentes 
 ```
 reconocimiento IA/
 │
-├── main.py                    ← Punto de entrada principal
-├── requirements.txt           ← Lista de dependencias
+├── main.py                        # Bucle principal y composición de ventana
+├── requirements.txt
 │
 ├── src/
-│   ├── core/                  ← Núcleo de detección con IA
-│   │   ├── gesture_detector.py    (detecta la mano y los dedos)
-│   │   ├── pose_detector.py       (detecta el cuerpo: hombros, cabeza...)
-│   │   └── gesture_classifier.py  (clasifica el gesto con ML)
+│   ├── core/
+│   │   ├── gesture_detector.py    # Detección de mano + suavizado + clasificación
+│   │   ├── gesture_classifier.py  # Wrapper del modelo sklearn
+│   │   └── pose_detector.py       # Detección de pose corporal con suavizado EMA
 │   │
-│   └── visual/                ← Todo lo visual
-│       ├── filters/           ← Los 5 efectos visuales
-│       │   ├── shadow_mode.py
-│       │   ├── golden_hour.py
-│       │   ├── fire_shoulders.py
-│       │   ├── confetti_rain.py
-│       │   └── golden_crown.py
-│       ├── body_regions.py        (calcula dónde están hombros, torso, cabeza)
-│       ├── visual_effects.py      (conecta gestos con efectos)
-│       └── effect_renderer.py     (renderiza con transiciones suaves)
+│   └── visual/
+│       ├── filters/
+│       │   ├── shadow_mode.py     # Efecto 1: armadura Netherite (polígono procedural + textura PNG)
+│       │   ├── golden_hour.py     # Efecto 2: corrección de color + viñeta
+│       │   ├── fire_shoulders.py  # Efecto 3: llamas animadas con jitter sinusoidal
+│       │   ├── confetti_rain.py   # Efecto 4: sistema de partículas con rotación
+│       │   └── golden_crown.py    # Efecto 5: PNG con alpha anclado por FaceMesh
+│       ├── body_regions.py        # Cálculo de regiones corporales en píxeles
+│       ├── visual_effects.py      # Despacho gesto → función de efecto
+│       └── effect_renderer.py     # Fade-in/out entre efectos
 │
 ├── scripts/
-│   ├── train_model.py         ← Entrena el modelo con tus datos
-│   ├── setup_images.py        ← Genera imágenes de prueba
-│   └── test_imports.py        ← Verifica que la instalación es correcta
+│   ├── train_model.py             # Entrenamiento RF + MLP con métricas
+│   ├── setup_images.py            # Genera imágenes de placeholder
+│   └── test_imports.py            # Verificación de dependencias
 │
-├── models/                    ← Modelos de IA preentrenados (MediaPipe)
+├── dataset/
+│   ├── dataset_landmarks.csv      # 11.658 muestras (63 features + etiqueta)
+│   ├── gesture_model.pkl          # Modelo entrenado (Random Forest)
+│   └── label_encoder.pkl          # Codificador de etiquetas
+│
+├── models/                        # Modelos de MediaPipe (descarga automática)
 │   ├── hand_landmarker.task
 │   └── pose_landmarker_lite.task
 │
-├── dataset/                   ← Datos de entrenamiento y modelo guardado
-│   ├── dataset_landmarks.csv      (tus datos grabados)
-│   ├── gesture_model.pkl          (modelo entrenado)
-│   └── label_encoder.pkl
-│
-├── images/                    ← Imágenes usadas en los efectos
-└── capturas/                  ← Capturas de pantalla guardadas con S
+├── images/                        # Texturas PNG para los efectos
+└── capturas/                      # Capturas guardadas con la tecla S
 ```
 
 ---
 
-## Cómo funciona la IA por dentro
+## Tecnologías utilizadas
 
-El programa usa **dos capas de inteligencia artificial**:
-
-### Capa 1 — Detección visual (MediaPipe, de Google)
-- **Detector de mano:** Localiza 21 puntos clave de tu mano (nudillos, puntas de dedos, etc.).
-- **Detector de pose:** Localiza 33 puntos de tu cuerpo (hombros, caderas, cabeza...).
-
-### Capa 2 — Clasificación del gesto
-1. **Método geométrico (siempre activo):** Compara la posición de la punta de cada dedo con su articulación para saber si está extendido o doblado.
-2. **Modelo de Machine Learning (si está entrenado):** Un clasificador Random Forest + red neuronal entrenado con tus propios gestos.
-
-Si el modelo entrenado no está seguro (confianza menor al 55%), el programa vuelve automáticamente al método geométrico.
+| Librería | Versión mínima | Uso |
+|----------|---------------|-----|
+| `mediapipe` | 0.10.0 | Detección de mano (HandLandmarker) y cuerpo (PoseLandmarker) |
+| `opencv-python` | 4.8.0 | Captura de vídeo, rendering y operaciones de imagen |
+| `scikit-learn` | 1.3.0 | RandomForestClassifier y MLPClassifier |
+| `numpy` | 1.24.0 | Operaciones matriciales y blend de píxeles |
+| `pandas` | 2.0.0 | Carga y preprocesado del dataset CSV |
+| `joblib` | 1.3.0 | Serialización del modelo entrenado |
 
 ---
 
-## Entrenar tu propio modelo (opcional)
-
-Si los gestos no se detectan bien con tu mano, puedes entrenar el modelo con tus propios datos en tres pasos:
-
-### Paso 1 — Grabar tus gestos
-
-```bash
-python main.py
-```
-
-Presiona `M` para entrar en **modo GRABACIÓN**. Luego usa estas teclas para grabar 5 segundos de cada gesto:
-
-| Tecla | Gesto que graba |
-|-------|----------------|
-| `1` | 1 dedo |
-| `2` | 2 dedos |
-| `3` | 3 dedos |
-| `4` | 4 dedos |
-| `O` | 5 dedos (mano abierta) |
-
-Repite varias veces cada gesto para tener más datos. Presiona `F` para guardar.
-
-### Paso 2 — Entrenar el modelo
-
-```bash
-python scripts/train_model.py
-```
-
-El script entrena el modelo y lo guarda en `dataset/gesture_model.pkl`. La próxima vez que ejecutes el programa, usará automáticamente tu modelo personalizado.
-
----
-
-## Solución de problemas comunes
+## Solución de problemas
 
 **La cámara no se abre**
-- Comprueba que ninguna otra aplicación esté usando la cámara.
-- Prueba cambiando `CAMERA_INDEX = 0` a `1` en `main.py` si tienes varias cámaras.
+Cambiar `CAMERA_INDEX = 0` a `1` (o `2`) en `main.py` si hay varias cámaras conectadas.
 
-**No detecta mi mano**
-- Asegúrate de tener buena iluminación.
-- Pon la mano a una distancia de 30–80 cm de la cámara.
-- Un fondo claro mejora la detección.
+**No detecta la mano**
+Iluminación frontal uniforme y fondo no saturado mejoran notablemente la detección. Distancia recomendada: 30–80 cm.
 
-**Los efectos van lentos**
-- Reduce la resolución en `main.py`: cambia `CAMERA_WIDTH` y `CAMERA_HEIGHT` a valores menores (ej: 480×360).
+**Los efectos no aparecen aunque detecta la mano**
+Los efectos requieren que el sistema detecte también la pose corporal (torso visible). El indicador de estado de pose aparece en pantalla si el modo debug (tecla `D`) está activo.
 
-**Error al instalar MediaPipe**
-- Asegúrate de usar Python 3.8–3.11. MediaPipe aún no es compatible con Python 3.12+.
-
----
-
-## Tecnologías usadas
-
-- **[MediaPipe](https://mediapipe.dev/)** — Framework de IA de Google para detección de manos y cuerpo
-- **[OpenCV](https://opencv.org/)** — Procesamiento de vídeo en tiempo real
-- **[scikit-learn](https://scikit-learn.org/)** — Algoritmos de machine learning
-- **Python 3** — Lenguaje de programación
+**Error de encoding al ejecutar `train_model.py` en Windows**
+```bash
+$env:PYTHONIOENCODING="utf-8"; python scripts/train_model.py
+```
 
 ---
 

@@ -186,9 +186,8 @@ def run():
     images    = ImageManager(display_size=(PANEL_SIZE, PANEL_SIZE))
     collector = DatasetCollector()
     
-    # ── nuevos módulos para efectos visuales ──────────────────────────────────
-    pose_detector = PoseDetector()
-    body_regions  = BodyRegions()
+    pose_detector   = PoseDetector()
+    body_regions    = BodyRegions()
     effect_renderer = EffectRenderer(fade_speed=FADE_STEP)
     
     captures_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "capturas")

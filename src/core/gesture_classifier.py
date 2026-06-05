@@ -1,11 +1,11 @@
 """
 gesture_classifier.py
 ---------------------
-Carga el modelo entrenado y proporciona una interfaz simple
-para predecir gestos a partir de landmarks normalizados.
+Carga el modelo entrenado (Random Forest) y predice gestos a partir
+de landmarks normalizados.
 
-Se usa DENTRO de gesture_detector.py como sustituto de las reglas geométricas.
-Si el modelo no existe, gesture_detector.py sigue usando las reglas (fallback).
+Cuando el modelo no está disponible, gesture_detector.py recae en
+las reglas geométricas incorporadas.
 
 Uso directo
 ───────────
